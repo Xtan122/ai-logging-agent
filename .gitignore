@@ -1,4 +1,49 @@
 .env
+
+# Virtual environments
 venv/
+.venv/
+env/
+
+# Python cache/compiled files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Logs
+logs/
+*.log
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checker / linter caches
+.mypy_cache/
+.ruff_cache/
+.pyre/
+
+# Build/distribution artifacts
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# IDE/editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.eggs/
+*.egg-info/
