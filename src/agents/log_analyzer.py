@@ -1,9 +1,14 @@
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from ..models import GeminiModel
-from ..tools import get_log_tools
+from ..tools import get_log_tools, requires_approval
 from ..utils.response import extract_response_text
 from ..config import Config
+
+CONFIRMATIONS = {'yes', 'y', 'true', '1', 'ok', 'affirmative', 'confirm', 'sure', 'correct'}
+
+def if_confirm(text: str) -> bool:
+    return text.strip().lower() in CONFIRMATIONS
 
 class LogAnalyzerAgent:
     """
@@ -47,19 +52,33 @@ class LogAnalyzerAgent:
         # Create chain
         self.chain = self.prompt | self.llm_with_tools
 
-    def process_query(self, user_input: str, chat_history: list = None) -> str:
+    def process_query(
+        self,
+        user_input: str,
+        chat_history: list = None,
+        approval_granted: bool = False,
+    ):
         """
         Process a user query and return the response.
 
-        The agent is stateless — the caller is responsible for maintaining and
-        passing the full conversation history on every call.
+        Returns either:
+        - str  : the agent's final text response, OR
+        - dict : {"blocked": True, "tool_call": ..., "message": ...}
+                 when a destructive tool needs user confirmation (Turn 1).
+
+        Approval flow (matches the sequence diagram):
+          Turn 1 ─ LLM calls a gated tool → agent returns blocked sentinel.
+          Turn 2 ─ User says "yes", caller sets approval_granted=True and
+                    re-invokes.  LLM re-emits the tool call; gate is open.
 
         Args:
-            user_input (str): The user's input query.
-            chat_history (list): LangChain message objects representing prior turns.
+            user_input (str): The user's message.
+            chat_history (list): Full prior conversation history.
+            approval_granted (bool): Set True when the user has confirmed
+                a previously blocked action.
 
         Returns:
-            str: The response from the AI agent.
+            str | dict
         """
         if chat_history is None:
             chat_history = []
@@ -72,7 +91,16 @@ class LogAnalyzerAgent:
 
             if getattr(response, "tool_calls", None):
                 tool_messages = [HumanMessage(content=user_input)]
-                response = self.handle_tool_call(tool_messages, response, chat_history)
+                response = self.handle_tool_call(
+                    tool_messages,
+                    response,
+                    chat_history,
+                    approval_granted=approval_granted,
+                )
+
+            # Blocked sentinel — pass straight through to caller
+            if isinstance(response, dict) and response.get("blocked"):
+                return response
 
             return extract_response_text(response)
 
@@ -83,8 +111,13 @@ class LogAnalyzerAgent:
             traceback.print_exc()
             return error_message
 
-    def processing_query(self, user_input: str, chat_history: list = None) -> str:
-        return self.process_query(user_input, chat_history)
+    def processing_query(
+        self,
+        user_input: str,
+        chat_history: list = None,
+        approval_granted: bool = False,
+    ) -> str:
+        return self.process_query(user_input, chat_history, approval_granted)
 
     def _invoke_with_history(self, extra_messages: list, chat_history: list):
         """
@@ -103,14 +136,37 @@ class LogAnalyzerAgent:
             "chat_history": chat_history + extra_messages,
         })
 
-    def handle_tool_call(self, messages, response, chat_history: list) -> str:
+    def handle_tool_call(
+        self,
+        messages: list,
+        response,
+        chat_history: list,
+        approval_granted: bool = False,
+    ):
         """
-        Handle the tool call from the model and return the final response.
+        Execute tool calls from the LLM, with a human-in-the-loop gate for
+        destructive tools.
+
+        Approval flow (two-turn pattern from the sequence diagram):
+
+        Turn 1 ─ approval_granted=False (default)
+          • LLM emits tool_call for a gated tool.
+          • Agent injects a BLOCKED ToolMessage so the LLM knows it was stopped.
+          • LLM writes a recommendation / evidence summary.
+          • Agent returns sentinel: {"blocked": True, "tool_call": ..., "message": ...}
+          • Caller displays the recommendation and waits for the user.
+
+        Turn 2 ─ approval_granted=True  (caller detected user said "yes")
+          • Chat history now includes the recommendation from Turn 1.
+          • LLM sees the context and re-emits the same tool_call.
+          • Gate checks requires_approval() → True, but approval_granted=True → allowed.
+          • Tool executes; result returned normally.
 
         Args:
-            tool_call: The tool call object from the model.
-            user_input (str): The user's input query.
-
+            messages:         Current-turn message thread (mutated in place).
+            response:         Latest AIMessage from the LLM.
+            chat_history:     Full prior conversation history.
+            approval_granted: True when the user has already confirmed the action.
         """
         tool_map = {tool.name: tool for tool in self.tools}
         current_response = response
@@ -123,13 +179,34 @@ class LogAnalyzerAgent:
 
             messages.append(current_response)
 
-            resolved_tool_messages = []
             for tool_call in tool_calls:
-                tool_name = tool_call.get("name")
-                tool_args = tool_call.get("args", {})
+                tool_name    = tool_call.get("name")
+                tool_args    = tool_call.get("args", {})
                 tool_call_id = tool_call.get("id")
-                tool_func = tool_map.get(tool_name)
+                tool_func    = tool_map.get(tool_name)
 
+                # ── APPROVAL GATE ───────────────────────────────────────────
+                if requires_approval(tool_name):
+                    if not approval_granted:
+                        # --- BLOCKED: inject hint so LLM writes a recommendation
+                        block_hint = ToolMessage(
+                            content=(
+                                f"[BLOCKED] Tool '{tool_name}' requires user approval "
+                                f"before execution.\nArguments: {tool_args}\n"
+                                "Summarise your findings and ask the user to confirm."
+                            ),
+                            tool_call_id=tool_call_id or tool_name,
+                        )
+                        messages.append(block_hint)
+                        recommendation = self._invoke_with_history(messages, chat_history)
+                        return {
+                            "blocked": True,
+                            "tool_call": tool_call,
+                            "message": extract_response_text(recommendation),
+                        }
+                    # --- ALLOWED: approval_granted=True, fall through to execute
+
+                # ── Execute tool (safe or approved) ───────────────────────────
                 if tool_func is None:
                     tool_result = f"Error: Tool '{tool_name}' is not available."
                 else:
@@ -138,12 +215,12 @@ class LogAnalyzerAgent:
                     except Exception as e:
                         tool_result = f"Error: {str(e)}"
 
-                tool_message = ToolMessage(
-                    content=tool_result,
-                    tool_call_id=tool_call_id or tool_name,
+                messages.append(
+                    ToolMessage(
+                        content=tool_result,
+                        tool_call_id=tool_call_id or tool_name,
+                    )
                 )
-                resolved_tool_messages.append(tool_message)
-                messages.append(tool_message)
 
             current_response = self._invoke_with_history(messages, chat_history)
 

@@ -7,45 +7,88 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+
 class Config:
     """
     Configuration class for the AI Log Analyzer.
+
+    LLM provider is selected via LLM_PROVIDER env var ('gemini' or 'github').
+    AWS and Slack credentials are optional — tools fall back to placeholder
+    mode when they are not configured.
     """
 
-    # API Congiguration
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
-    TEMPERATURE: float = float(os.getenv("TEMPERATURE", 0.1))
+    # ── LLM Provider ──────────────────────────────────────────────────────────
+    # 'gemini' (default) or 'github'
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "gemini").lower()
 
-    # Paths
+    # ── Gemini ────────────────────────────────────────────────────────────────
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+    # ── GitHub Models ─────────────────────────────────────────────────────────
+    GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
+    GITHUB_MODEL: str = os.getenv("GITHUB_MODEL", "openai/gpt-4.1")
+    GITHUB_ENDPOINT: str = os.getenv(
+        "GITHUB_ENDPOINT",
+        "https://models.github.ai/inference",
+    )
+
+    # ── AWS ───────────────────────────────────────────────────────────────────
+    AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
+    AWS_RDS_INSTANCE_ID: str = os.getenv("AWS_RDS_INSTANCE_ID", "")
+
+    # ── Slack ─────────────────────────────────────────────────────────────────
+    SLACK_WEBHOOK_URL: str = os.getenv("SLACK_WEBHOOK_URL", "")
+    SLACK_CHANNEL: str = os.getenv("SLACK_CHANNEL", "#devops-alerts")
+
+    # ── Paths ─────────────────────────────────────────────────────────────────
     LOG_DIRECTORY: str = os.getenv("LOG_DIRECTORY", "logs")
 
-    # Agent configuration
-    MAX_INTERATIONS: int = 5
+    # ── Agent ─────────────────────────────────────────────────────────────────
+    MAX_ITERATIONS: int = 10
+    TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.1"))
     VERBOSE: bool = True
 
+    # Backward-compat alias (old typo kept so nothing breaks while migrating)
+    MAX_INTERATIONS: int = MAX_ITERATIONS
+
     @classmethod
-    def validate(cls):
+    def validate(cls) -> None:
         """
-        Validates the configuration values.
-        Raises ValueError if any required configuration is missing or invalid.
+        Validate that the selected LLM provider has the required credentials.
+        AWS and Slack are optional; missing credentials just enable placeholder mode.
+
+        Raises:
+            ValueError: if the active provider is missing its API key/token.
         """
-        if not cls.GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY is not set in the environment variables.")
-        if not os.path.isdir(cls.LOG_DIRECTORY):
-            raise ValueError(f"LOG_DIRECTORY '{cls.LOG_DIRECTORY}' does not exist.")
+        if cls.LLM_PROVIDER == "gemini" and not cls.GEMINI_API_KEY:
+            raise ValueError(
+                "LLM_PROVIDER=gemini but GEMINI_API_KEY is not set."
+            )
+        if cls.LLM_PROVIDER == "github" and not cls.GITHUB_TOKEN:
+            raise ValueError(
+                "LLM_PROVIDER=github but GITHUB_TOKEN is not set."
+            )
 
     @classmethod
     def get_system_prompt(cls) -> str:
         """
-        Returns the system prompt for the AI Log Analyzer.
+        Load the system prompt from system_prompt.txt (required) and append
+        examples.txt (optional) if it exists.
+
+        Returns:
+            str: The full system prompt string.
         """
-        # system_prompt.txt lives in the project root (one level above src/)
-        prompt_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "system_prompt.txt")
+        base_dir = os.path.dirname(os.path.dirname(__file__))
 
-        with open(prompt_file, 'r', encoding='utf-8') as f:
-            return f.read()
+        with open(os.path.join(base_dir, "system_prompt.txt"), "r", encoding="utf-8") as f:
+            prompt = f.read()
 
+        examples_file = os.path.join(base_dir, "examples.txt")
+        try:
+            with open(examples_file, "r", encoding="utf-8") as f:
+                prompt += "\n\n" + f.read()
+        except FileNotFoundError:
+            pass  # examples are optional
 
-            
-
+        return prompt

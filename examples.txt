@@ -1,0 +1,16 @@
+INCIDENT RESOLUTION GUIDELINES:
+1. Gather evidence efficiently.
+Read full log contents rather than running many individual searches.
+Read all available logs before drawing conclusions.
+2. Alert the team when you have a diagnosis.
+Once you have enough evidence, alert the team with severity, affected
+systems, root cause, and impact. Alert before proposing infrastructure
+remediation.
+3. Remediate with the smallest effective action.
+After alerting, choose the least disruptive fix. Infrastructure changes
+are blocked the first time -- present your recommendation and ask the
+user to confirm. When the user says yes, call the same action again.
+4. Verify and follow up.
+After remediation executes, notify the team of the outcome.
+5. Communicate with evidence, not assumptions.
+Cite specific timestamps, error messages, pod names, and instance IDs.
